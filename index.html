@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#111111">
+<title>Mock Fare Terminal</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+    background: #111;
+    color: #fff;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  #idle {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    gap: 18px;
+  }
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .stats { font-size: 16px; color: #aaa; line-height: 1.5; }
+  .stats b { color: #fff; font-weight: 600; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    color: #fff;
+    background: #222;
+    border: 1px solid #444;
+    border-radius: 12px;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .ctl { font-size: 16px; padding: 12px 18px; min-height: 48px; }
+  .ctl.on { background: #0a5; border-color: #0c6; }
+  button:active { transform: scale(0.97); }
+
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    min-height: 0;
+  }
+  #prompt { font-size: clamp(22px, 4.5vw, 44px); font-weight: 600; text-align: center; }
+  .fares {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    width: 100%;
+    max-width: 760px;
+  }
+  .fare {
+    min-height: 88px;
+    font-size: clamp(24px, 4vw, 36px);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+  }
+  .fare small { font-size: 13px; font-weight: 400; color: #999; }
+  .fare.selected { background: #fff; color: #111; border-color: #fff; }
+  .fare.selected small { color: #555; }
+
+  #payBtn {
+    width: 100%;
+    max-width: 760px;
+    min-height: 110px;
+    font-size: clamp(26px, 5vw, 46px);
+    font-weight: 700;
+    background: #1d6fe0;
+    border-color: #2f80f0;
+    font-variant-numeric: tabular-nums;
+  }
+  #hint { font-size: 13px; color: #666; text-align: center; }
+
+  #green {
+    position: fixed;
+    inset: 0;
+    background: #00FF00;
+    display: none;
+    z-index: 9999;
+    cursor: none;
+  }
+  body.green-on { background: #00FF00; cursor: none; }
+  body.green-on #green { display: block; }
+  body.green-on #idle { visibility: hidden; }
+
+  @media (max-width: 520px) {
+    .fares { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+</style>
+</head>
+<body>
+  <div id="idle">
+    <div class="topbar">
+      <div class="stats">
+        <div id="counter">Payments triggered: <b>0</b></div>
+        <div id="total">Total collected: <b>$0.00</b></div>
+      </div>
+      <div class="controls">
+        <button id="fsBtn" class="ctl" type="button">Full Screen</button>
+        <button id="holdBtn" class="ctl" type="button">Hold Green: OFF</button>
+      </div>
+    </div>
+
+    <div class="main">
+      <div id="prompt">Select fare, then tap to pay</div>
+      <div class="fares" id="fares"></div>
+      <button id="payBtn" type="button">TAP TO PAY $2.75</button>
+      <div id="hint">SPACE = pay &middot; 1&ndash;6 = select fare &middot; F = fullscreen &middot; H = hold green &middot; ESC = cancel</div>
+    </div>
+  </div>
+  <div id="green"></div>
+
+<script>
+(function () {
+  var GREEN_MS = 3000;
+  var FARES = [
+    { amount: 1.00,  label: 'Reduced' },
+    { amount: 2.00,  label: 'Bus' },
+    { amount: 2.75,  label: 'Standard' },
+    { amount: 3.50,  label: 'Express' },
+    { amount: 5.00,  label: 'Zone 2' },
+    { amount: 10.00, label: 'Day pass' }
+  ];
+
+  var body = document.body;
+  var fsBtn = document.getElementById('fsBtn');
+  var holdBtn = document.getElementById('holdBtn');
+  var payBtn = document.getElementById('payBtn');
+  var faresEl = document.getElementById('fares');
+  var counterEl = document.getElementById('counter');
+  var totalEl = document.getElementById('total');
+  var greenEl = document.getElementById('green');
+
+  var paying = false;   // 3-second payment green active
+  var hold = false;     // hold-green toggle
+  var payTimer = null;
+  var count = 0;
+  var total = 0;
+  var selected = 2;     // default: $2.75
+
+  function money(n) { return '$' + n.toFixed(2); }
+
+  // Build fare tiles
+  var fareBtns = FARES.map(function (f, i) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'fare';
+    b.innerHTML = money(f.amount) + '<small>' + f.label + '</small>';
+    b.addEventListener('click', function () { selectFare(i); b.blur(); });
+    faresEl.appendChild(b);
+    return b;
+  });
+
+  function isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  }
+  function enterFullscreen() {
+    var el = document.documentElement;
+    var req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req && !isFullscreen()) {
+      try { var p = req.call(el); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+    }
+  }
+  function exitFullscreen() {
+    var ex = document.exitFullscreen || document.webkitExitFullscreen;
+    if (ex && isFullscreen()) {
+      try { var p = ex.call(document); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+    }
+  }
+  function toggleFullscreen() {
+    if (isFullscreen()) exitFullscreen(); else enterFullscreen();
+  }
+
+  function render() {
+    body.classList.toggle('green-on', paying || hold);
+    holdBtn.textContent = 'Hold Green: ' + (hold ? 'ON' : 'OFF');
+    holdBtn.classList.toggle('on', hold);
+    counterEl.innerHTML = 'Payments triggered: <b>' + count + '</b>';
+    totalEl.innerHTML = 'Total collected: <b>' + money(total) + '</b>';
+    payBtn.textContent = 'TAP TO PAY ' + money(FARES[selected].amount);
+    fareBtns.forEach(function (b, i) { b.classList.toggle('selected', i === selected); });
+  }
+
+  function greenShowing() { return paying || hold; }
+
+  function selectFare(i) {
+    if (greenShowing() || i < 0 || i >= FARES.length) return;
+    selected = i;
+    render();
+  }
+
+  function pay() {
+    if (greenShowing()) return; // ignore while green is visible
+    enterFullscreen();
+    paying = true;
+    count++;
+    total += FARES[selected].amount;
+    render();
+    payTimer = setTimeout(function () {
+      paying = false;
+      payTimer = null;
+      render();
+    }, GREEN_MS);
+  }
+
+  function toggleHold() {
+    hold = !hold;
+    render();
+  }
+
+  function cancelGreen() {
+    if (payTimer) { clearTimeout(payTimer); payTimer = null; }
+    paying = false;
+    hold = false;
+    render();
+  }
+
+  payBtn.addEventListener('click', function () { pay(); payBtn.blur(); });
+  fsBtn.addEventListener('click', function () { toggleFullscreen(); fsBtn.blur(); });
+  holdBtn.addEventListener('click', function () { toggleHold(); holdBtn.blur(); });
+
+  // Touch: tapping the green screen releases Hold Green (no ESC key on a tablet).
+  // Taps during the 3-second payment green are ignored.
+  greenEl.addEventListener('click', function () {
+    if (hold && !paying) { hold = false; render(); }
+  });
+
+  // Block pinch-zoom / long-press menus on iOS.
+  document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+  document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+  function isSpace(e) { return e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar'; }
+
+  // Capture phase so focused buttons never receive SPACE (no scroll, no click).
+  window.addEventListener('keydown', function (e) {
+    if (isSpace(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) pay();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var k = e.key;
+    if (k === 'Escape' || k === 'Esc') {
+      cancelGreen();
+    } else if (k === 'f' || k === 'F') {
+      e.preventDefault();
+      if (!e.repeat) toggleFullscreen();
+    } else if (k === 'h' || k === 'H') {
+      e.preventDefault();
+      if (!e.repeat) toggleHold();
+    } else if (k >= '1' && k <= '9') {
+      selectFare(parseInt(k, 10) - 1);
+    }
+  }, true);
+
+  // Buttons activate on SPACE keyup — block that too.
+  window.addEventListener('keyup', function (e) {
+    if (isSpace(e)) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+
+  render();
+})();
+</script>
+</body>
+</html>
